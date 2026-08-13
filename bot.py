@@ -427,6 +427,21 @@ async def cmd_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.effective_message.reply_text("未知命令，发送 /help 查看可用命令。")
 
 
+async def cmd_my_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """私聊命令：返回发送者自己的数字 ID（同时记录用户名）。"""
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+    store: BridgeStore = context.bot_data["store"]
+    await store.remember_user(user.id, user.username)
+    username = f"（@{user.username}）" if user.username else ""
+    await message.reply_text(
+        f"你的数字 ID：{user.id} {username}\n"
+        "把这个数字发给群管理员，就能通过 /allow 和 /bind 添加你。"
+    )
+
+
 # ---------- 私聊消息：外部用户 -> 目标群/Topic/频道 ----------
 
 async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -881,6 +896,7 @@ def main() -> None:
     app.add_handler(CommandHandler("stop", cmd_stop, filters=PRIVATE_FILTER))
     app.add_handler(CommandHandler("status", cmd_private_status, filters=PRIVATE_FILTER))
     app.add_handler(CommandHandler("help", cmd_help, filters=PRIVATE_FILTER))
+    app.add_handler(CommandHandler("id", cmd_my_id, filters=PRIVATE_FILTER))
     app.add_handler(MessageHandler(PRIVATE_FILTER & filters.COMMAND, cmd_unknown))
     app.add_handler(MessageHandler(PRIVATE_FILTER & ~filters.COMMAND, handle_private_message))
 
