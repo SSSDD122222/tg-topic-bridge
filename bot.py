@@ -898,7 +898,6 @@ def main() -> None:
     app.add_handler(CommandHandler("status", cmd_private_status, filters=PRIVATE_FILTER))
     app.add_handler(CommandHandler("help", cmd_help, filters=PRIVATE_FILTER))
     app.add_handler(CommandHandler("id", cmd_my_id, filters=PRIVATE_FILTER))
-    app.add_handler(MessageHandler(PRIVATE_FILTER & filters.COMMAND, cmd_unknown))
     app.add_handler(MessageHandler(PRIVATE_FILTER & ~filters.COMMAND, handle_private_message))
 
     app.add_handler(CommandHandler("set_topic", cmd_set_topic, filters=GROUP_FILTER))
@@ -915,6 +914,7 @@ def main() -> None:
     app.add_handler(CommandHandler("leave", cmd_leave, filters=GROUP_FILTER))
     app.add_handler(CommandHandler("groups", cmd_groups, filters=PRIVATE_FILTER))
     app.add_handler(MessageHandler(GROUP_FILTER & ~filters.COMMAND, handle_group_message))
+    app.add_handler(MessageHandler(PRIVATE_FILTER & filters.COMMAND, cmd_unknown))
 
     app.add_error_handler(error_handler)
 
