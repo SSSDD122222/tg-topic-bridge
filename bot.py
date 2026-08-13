@@ -60,7 +60,7 @@ ALLOWED_USER_IDS = {
     if part.strip().lstrip("-").isdigit()
 }
 
-BRIDGE_MODE = os.getenv("BRIDGE_MODE", "forward").strip().lower()
+BRIDGE_MODE = os.getenv("BRIDGE_MODE", "copy").strip().lower()
 if BRIDGE_MODE not in {"forward", "copy"}:
     raise SystemExit("BRIDGE_MODE 只能是 forward（保留转发来源）或 copy（匿名转发）。")
 
@@ -86,13 +86,14 @@ HELP_TEXT = (
 
 PRIVATE_FILTER = filters.ChatType.PRIVATE
 GROUP_FILTER = filters.ChatType.GROUP | filters.ChatType.SUPERGROUP
+CHANNEL_FILTER = filters.ChatType.CHANNEL
 
 
-def _can_use(user_id: int) -> bool:
+async def _can_use(store: BridgeStore, user_id: int) -> bool:
     """未配置白名单时允许所有人；配置后仅白名单成员（或管理员）可用。"""
     if user_id in ADMIN_USER_IDS:
         return True
-    return not ALLOWED_USER_IDS or user_id in ALLOWED_USER_IDS
+    return await store.is_allowed(user_id)
 
 
 async def _is_group_admin(
@@ -126,6 +127,7 @@ class BridgeStore:
             "subscribers": [],
             "mappings": {},
             "users": {},
+            "allowed_users": list(ALLOWED_USER_IDS),
         }
         self._load()
 
@@ -142,6 +144,7 @@ class BridgeStore:
         self.data.setdefault("subscribers", [])
         self.data.setdefault("mappings", {})
         self.data.setdefault("users", {})
+        self.data.setdefault("allowed_users", list(ALLOWED_USER_IDS))
         self._save()
 
     def _save(self) -> None:
@@ -215,6 +218,36 @@ class BridgeStore:
                 if str(info.get("username", "")).lower() == key:
                     return int(uid_str)
         return None
+
+    # ---------- 外部用户白名单（运行时管理） ----------
+
+    async def is_allowed(self, user_id: int) -> bool:
+        """白名单模式：只放行名单内成员（空名单 = 不允许任何人）。"""
+        async with self._lock:
+            allowed = self.data.get("allowed_users") or []
+            return user_id in allowed
+
+    async def add_allowed(self, user_id: int) -> bool:
+        async with self._lock:
+            allowed = self.data.setdefault("allowed_users", [])
+            if user_id in allowed:
+                return False
+            allowed.append(user_id)
+            self._save()
+            return True
+
+    async def remove_allowed(self, user_id: int) -> bool:
+        async with self._lock:
+            allowed = self.data.get("allowed_users") or []
+            if user_id not in allowed:
+                return False
+            allowed.remove(user_id)
+            self._save()
+            return True
+
+    async def list_allowed(self) -> list[int]:
+        async with self._lock:
+            return list(self.data.get("allowed_users") or [])
 
     # ---------- 用户分流映射 ----------
 
@@ -302,8 +335,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     store: BridgeStore = context.bot_data["store"]
     await store.remember_user(user.id, user.username)
-    if not _can_use(user.id):
-        await message.reply_text("⛔ 你没有使用该桥接机器人的权限。")
+    if not await _can_use(store, user.id):
+        await message.reply_text(
+            "⛔ 你没有使用该桥接机器人的权限。\n"
+            "你的用户名已被记录，请联系管理员执行 /allow @你的用户名 放行后重试。"
+        )
         return
     if await store.get_mapping(user.id) is None and not store.get_topic():
         await message.reply_text(
@@ -367,8 +403,11 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         return
     store: BridgeStore = context.bot_data["store"]
     await store.remember_user(user.id, user.username)
-    if not _can_use(user.id):
-        await message.reply_text("⛔ 你没有使用该桥接机器人的权限。")
+    if not await _can_use(store, user.id):
+        await message.reply_text(
+            "⛔ 你没有使用该桥接机器人的权限。\n"
+            "你的用户名已被记录，请联系管理员执行 /allow @你的用户名 放行后重试。"
+        )
         return
 
     destination = await store.get_destination(user.id)
@@ -602,6 +641,89 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await message.reply_text(f"✅ 已移除用户 {target} 的全部绑定。" if removed else "ℹ️ 该用户不在任何绑定中。")
 
 
+async def cmd_allow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+    if not await _is_group_admin(update, context):
+        await message.reply_text("⛔ 只有群管理员可以操作。")
+        return
+    if not context.args:
+        await message.reply_text("用法：/allow <用户ID或@用户名>")
+        return
+    store: BridgeStore = context.bot_data["store"]
+    target = await store.resolve_user_id(context.args[0])
+    if target is None:
+        await message.reply_text(
+            "❌ 找不到该用户。数字 ID 可以直接用；@用户名 要求对方先私聊过机器人（发任意消息即可）。"
+        )
+        return
+    username = await store.get_username(target)
+    added = await store.add_allowed(target)
+    await message.reply_text(
+        f"✅ 已把 {target}{' (@' + username + ')' if username else ''} 加入白名单。"
+        if added
+        else "ℹ️ 该用户已经在白名单里。"
+    )
+
+
+async def cmd_channel_allow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """频道内使用：/allow <用户ID或@用户名> = 加入白名单 + 绑定到当前频道。
+
+    频道里只有管理员能发帖，因此收到这条命令即视为频道管理员操作。
+    """
+    message = update.effective_message
+    chat = update.effective_chat
+    if message is None or chat is None:
+        return
+    if not context.args:
+        await message.reply_text("用法：/allow <用户ID或@用户名>")
+        return
+    store: BridgeStore = context.bot_data["store"]
+    target = await store.resolve_user_id(context.args[0])
+    if target is None:
+        await message.reply_text(
+            "❌ 找不到该用户。数字 ID 可以直接用；@用户名 要求对方先私聊过机器人（发任意消息即可）。"
+        )
+        return
+    username = await store.get_username(target)
+    await store.add_allowed(target)
+    await store.set_mapping(target, chat.id, 0)
+    await message.reply_text(
+        f"✅ 已把 {target}{' (@' + username + ')' if username else ''} 加入白名单，"
+        f"并绑定到本频道（{chat.id}）。\n"
+        "之后：频道新消息会转发给 TA；TA 私聊机器人的消息会以机器人名义发布到本频道。"
+    )
+
+
+async def cmd_disallow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+    if not await _is_group_admin(update, context):
+        await message.reply_text("⛔ 只有群管理员可以操作。")
+        return
+    if not context.args:
+        await message.reply_text("用法：/disallow <用户ID或@用户名>")
+        return
+    store: BridgeStore = context.bot_data["store"]
+    target = await store.resolve_user_id(context.args[0])
+    if target is None:
+        await message.reply_text(
+            "❌ 找不到该用户。数字 ID 可以直接用；@用户名 要求对方先私聊过机器人（发任意消息即可）。"
+        )
+        return
+    username = await store.get_username(target)
+    removed = await store.remove_allowed(target)
+    await message.reply_text(
+        f"✅ 已把 {target}{' (@' + username + ')' if username else ''} 移出白名单。"
+        if removed
+        else "ℹ️ 该用户不在白名单里。"
+    )
+
+
 async def cmd_group_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     user = update.effective_user
@@ -624,6 +746,12 @@ async def cmd_group_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         name = await store.get_username(uid)
         sub_names.append(f"{uid}{' (@' + name + ')' if name else ''}")
     lines.append(f"• 默认订阅者（{len(subs)}）：{', '.join(sub_names) if sub_names else '无'}")
+    allowed = await store.list_allowed()
+    allowed_names = []
+    for uid in allowed:
+        name = await store.get_username(uid)
+        allowed_names.append(f"{uid}{' (@' + name + ')' if name else ''}")
+    lines.append(f"• 白名单（{len(allowed)}）：{', '.join(allowed_names) if allowed_names else '空=不允许任何人，需用 /allow 添加'}")
     lines.append(f"• 分流绑定（{len(mappings)}）：")
     if mappings:
         for uid, dest in sorted(mappings.items()):
@@ -658,6 +786,9 @@ def main() -> None:
     app.add_handler(CommandHandler("unbind", cmd_unbind, filters=GROUP_FILTER))
     app.add_handler(CommandHandler("add", cmd_add, filters=GROUP_FILTER))
     app.add_handler(CommandHandler("remove", cmd_remove, filters=GROUP_FILTER))
+    app.add_handler(CommandHandler("allow", cmd_allow, filters=GROUP_FILTER))
+    app.add_handler(CommandHandler("disallow", cmd_disallow, filters=GROUP_FILTER))
+    app.add_handler(CommandHandler("allow", cmd_channel_allow, filters=CHANNEL_FILTER))
     app.add_handler(CommandHandler("status", cmd_group_status, filters=GROUP_FILTER))
     app.add_handler(MessageHandler(GROUP_FILTER & ~filters.COMMAND, handle_group_message))
 
