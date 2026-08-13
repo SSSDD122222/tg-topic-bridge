@@ -1,0 +1,17 @@
+[Unit]
+Description=TG Topic Bridge Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tg-topic-bridge
+ExecStart=/opt/tg-topic-bridge/.venv/bin/python bot.py
+Restart=always
+RestartSec=5
+# 建议用非 root 账号运行，例如：
+# User=tgbridge
+# Group=tgbridge
+
+[Install]
+WantedBy=multi-user.target

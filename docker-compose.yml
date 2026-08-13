@@ -1,0 +1,9 @@
+services:
+  tg-topic-bridge:
+    build: .
+    container_name: tg-topic-bridge
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
