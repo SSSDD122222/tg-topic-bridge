@@ -166,7 +166,7 @@ journalctl -u tg-topic-bridge -f
 | `/topic` | 查看群 ID 和当前 Topic ID |
 | `/set_topic` | 把当前 Topic 设为默认桥接主题 |
 | `/allow <用户ID或@用户名>` | 把用户加入外部用户白名单 |
-| `/disallow <用户ID或@用户名>` | 把用户移出白名单 |
+| `/disallow <用户ID或@用户名>` | 把用户移出白名单，并同时解除他/她的全部绑定（所有群/Topic/频道） |
 | `/leave`（群内） | 让机器人退出当前群 |
 | `/leave <群ID>`（私聊管理员） | 远程让机器人退出指定群，并清理该群绑定 |
 | `/groups`（私聊管理员） | 查看机器人记录到的所有群（群 ID + 群名），可配合 `/leave` 使用 |
