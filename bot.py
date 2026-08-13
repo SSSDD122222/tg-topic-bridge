@@ -766,10 +766,11 @@ async def cmd_disallow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     username = await store.get_username(target)
     removed = await store.remove_allowed(target)
+    await store.remove_user(target)
     await message.reply_text(
-        f"✅ 已把 {target}{' (@' + username + ')' if username else ''} 移出白名单。"
+        f"✅ 已把 {target}{' (@' + username + ')' if username else ''} 移出白名单，并解除了他/她的全部绑定（订阅和分流映射）。"
         if removed
-        else "ℹ️ 该用户不在白名单里。"
+        else f"ℹ️ {target} 不在白名单里，但已解除他/她的全部绑定。"
     )
 
 
