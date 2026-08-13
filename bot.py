@@ -294,6 +294,18 @@ class BridgeStore:
                 self._save()
             return removed
 
+    async def remove_chat_mappings(self, chat_id: int) -> int:
+        """移除绑定到指定群/频道的所有映射，返回清理的用户数。"""
+        async with self._lock:
+            removed = []
+            for key, dest in list(self.data["mappings"].items()):
+                if int(dest["chat_id"]) == chat_id:
+                    removed.append(int(key))
+                    del self.data["mappings"][key]
+            if removed:
+                self._save()
+            return len(removed)
+
     async def get_destination(self, user_id: int) -> Optional[tuple[int, int]]:
         """返回用户消息应该转发到的 (chat_id, thread_id)；无映射时返回默认目标。"""
         async with self._lock:
@@ -763,6 +775,51 @@ async def cmd_group_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await message.reply_text("\n".join(lines))
 
 
+async def cmd_leave(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """让机器人退出某个群/频道。
+
+    - 私聊（管理员）：/leave <群ID>，可远程让机器人退出任何它所在的群；
+    - 群内：/leave，群管理员可直接让机器人退出当前群。
+    """
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if message is None or chat is None or user is None:
+        return
+
+    store: BridgeStore = context.bot_data["store"]
+    target_chat: Optional[int] = None
+
+    if chat.type == "private":
+        if user.id not in ADMIN_USER_IDS:
+            await message.reply_text("⛔ 只有配置的管理员可以远程让我退群。")
+            return
+        if not context.args:
+            await message.reply_text("用法（私聊）：/leave <群ID>")
+            return
+        try:
+            target_chat = int(context.args[0])
+        except ValueError:
+            await message.reply_text("❌ 群 ID 格式不正确（例如 -1001234567890）。")
+            return
+    else:
+        if not await _is_group_admin(update, context):
+            await message.reply_text("⛔ 只有群管理员可以让我退群。")
+            return
+        target_chat = chat.id
+
+    try:
+        await context.bot.leave_chat(chat_id=target_chat)
+    except TelegramError as exc:
+        await message.reply_text(f"❌ 退群失败：{exc}")
+        return
+
+    cleared = await store.remove_chat_mappings(target_chat)
+    await message.reply_text(
+        f"✅ 已退出群 {target_chat}，并清理了 {cleared} 个绑定关系。"
+    )
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("处理更新时出错：%s", context.error, exc_info=context.error)
 
@@ -789,6 +846,8 @@ def main() -> None:
     app.add_handler(CommandHandler("disallow", cmd_disallow, filters=GROUP_FILTER))
     app.add_handler(CommandHandler("allow", cmd_channel_allow, filters=CHANNEL_FILTER))
     app.add_handler(CommandHandler("status", cmd_group_status, filters=GROUP_FILTER))
+    app.add_handler(CommandHandler("leave", cmd_leave, filters=PRIVATE_FILTER))
+    app.add_handler(CommandHandler("leave", cmd_leave, filters=GROUP_FILTER))
     app.add_handler(MessageHandler(GROUP_FILTER & ~filters.COMMAND, handle_group_message))
 
     app.add_error_handler(error_handler)

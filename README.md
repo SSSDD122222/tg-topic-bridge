@@ -166,6 +166,8 @@ journalctl -u tg-topic-bridge -f
 | `/set_topic` | 把当前 Topic 设为默认桥接主题 |
 | `/allow <用户ID或@用户名>` | 把用户加入外部用户白名单 |
 | `/disallow <用户ID或@用户名>` | 把用户移出白名单 |
+| `/leave`（群内） | 让机器人退出当前群 |
+| `/leave <群ID>`（私聊管理员） | 远程让机器人退出指定群，并清理该群绑定 |
 
 以上分流命令和默认订阅命令一起构成了完整的管理方式，`/bind`、`/unbind`、`/add`、`/remove`、`/status` 的说明见上面的多用户分流表格。
 
