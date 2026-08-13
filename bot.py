@@ -19,7 +19,6 @@ from typing import Optional
 
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.constants import ChatMemberStatus
 from telegram.error import Forbidden, TelegramError
 from telegram.ext import (
     Application,
@@ -113,7 +112,7 @@ async def _is_group_admin(
     except TelegramError as exc:
         logger.warning("查询成员 %s 的管理权限失败：%s", user.id, exc)
         return False
-    return member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
+    return member.status in ("administrator", "creator")
 
 
 class BridgeStore:
