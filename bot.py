@@ -127,6 +127,7 @@ class BridgeStore:
             "mappings": {},
             "users": {},
             "allowed_users": list(ALLOWED_USER_IDS),
+            "groups": {},
         }
         self._load()
 
@@ -144,6 +145,7 @@ class BridgeStore:
         self.data.setdefault("mappings", {})
         self.data.setdefault("users", {})
         self.data.setdefault("allowed_users", list(ALLOWED_USER_IDS))
+        self.data.setdefault("groups", {})
         self._save()
 
     def _save(self) -> None:
@@ -247,6 +249,26 @@ class BridgeStore:
     async def list_allowed(self) -> list[int]:
         async with self._lock:
             return list(self.data.get("allowed_users") or [])
+
+    # ---------- 群记录（用于 /groups 查看机器人所在群） ----------
+
+    async def remember_group(self, chat_id: int, title: Optional[str]) -> None:
+        """记录机器人收到过消息的群（Telegram 没有查询机器人所在群的 API）。"""
+        async with self._lock:
+            groups = self.data.setdefault("groups", {})
+            key = str(chat_id)
+            entry = groups.get(key)
+            title = title or ""
+            if entry is None:
+                groups[key] = {"title": title}
+                self._save()
+            elif entry.get("title") != title:
+                entry["title"] = title
+                self._save()
+
+    async def list_groups(self) -> dict[int, dict]:
+        async with self._lock:
+            return {int(k): dict(v) for k, v in self.data.get("groups", {}).items()}
 
     # ---------- 用户分流映射 ----------
 
@@ -474,6 +496,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     store: BridgeStore = context.bot_data["store"]
+    await store.remember_group(chat.id, chat.title)
 
     if message.from_user is None and message.sender_chat is None:
         return  # 服务消息（成员进出等）不转发
@@ -820,6 +843,31 @@ async def cmd_leave(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """私聊管理员：查看机器人记录到的所有群。"""
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+    if user.id not in ADMIN_USER_IDS:
+        await message.reply_text("⛔ 只有配置的管理员可以查看。")
+        return
+    store: BridgeStore = context.bot_data["store"]
+    groups = await store.list_groups()
+    if not groups:
+        await message.reply_text(
+            "📋 目前没有记录到任何群。\n"
+            "机器人只会记录它收到过消息的群；新功能部署后，需要群里有人发消息（或机器人刚被拉进群）才会出现。"
+        )
+        return
+    lines = ["📋 机器人所在群："]
+    for chat_id, info in sorted(groups.items()):
+        title = info.get("title") or "(无标题)"
+        lines.append(f"• {title}（{chat_id}）")
+    lines.append("\n用 /leave <群ID> 可让机器人退出任意一个群。")
+    await message.reply_text("\n".join(lines))
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("处理更新时出错：%s", context.error, exc_info=context.error)
 
@@ -848,6 +896,7 @@ def main() -> None:
     app.add_handler(CommandHandler("status", cmd_group_status, filters=GROUP_FILTER))
     app.add_handler(CommandHandler("leave", cmd_leave, filters=PRIVATE_FILTER))
     app.add_handler(CommandHandler("leave", cmd_leave, filters=GROUP_FILTER))
+    app.add_handler(CommandHandler("groups", cmd_groups, filters=PRIVATE_FILTER))
     app.add_handler(MessageHandler(GROUP_FILTER & ~filters.COMMAND, handle_group_message))
 
     app.add_error_handler(error_handler)
