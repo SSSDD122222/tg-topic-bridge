@@ -295,5 +295,6 @@ scp -r "本地路径\tg-topic-bridge" root@你的IP:/opt/
 
 - 白名单默认全拒：只有通过 `ALLOWED_USER_IDS` 或 `/allow` 添加的用户才能私聊使用，避免任何人拿到 bot 后都能读取 Topic 内容。
 - 不要泄露 token；泄露后在 BotFather 中 `/revoke` 重新生成。
+- 日志已自动对 token 脱敏（显示为 `***`），查看 `docker compose logs` 不会暴露 token。
 - 想要隐藏 Topic 所属群的痕迹，把 `BRIDGE_MODE` 设为 `copy`。
 - 任何人知道 @用户名都可以把机器人拉进自己的群：建议在 BotFather 中关闭 **Allow Groups**（需要时再打开）；已拉入的群可用私聊 `/groups` 查看、`/leave <群ID>` 踢出。

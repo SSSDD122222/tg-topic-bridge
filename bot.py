@@ -42,6 +42,38 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 if not BOT_TOKEN:
     raise SystemExit("缺少 BOT_TOKEN，请在 .env 中配置。")
 
+
+class _TokenRedactionFilter(logging.Filter):
+    """日志过滤器：把日志中出现的 BOT_TOKEN 替换为 ***。"""
+
+    def __init__(self, token: str) -> None:
+        super().__init__()
+        self.token = token
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            if not self.token:
+                return True
+            record.msg = str(record.msg).replace(self.token, "***")
+            if isinstance(record.args, dict):
+                record.args = {
+                    k: (str(v).replace(self.token, "***") if isinstance(v, str) else v)
+                    for k, v in record.args.items()
+                }
+            elif isinstance(record.args, tuple):
+                record.args = tuple(
+                    str(a).replace(self.token, "***") if isinstance(a, str) else a
+                    for a in record.args
+                )
+        except Exception:
+            pass
+        return True
+
+
+for _handler in logging.root.handlers:
+    _handler.addFilter(_TokenRedactionFilter(BOT_TOKEN))
+
+
 GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "0") or 0)
 if not GROUP_CHAT_ID:
     raise SystemExit("缺少 GROUP_CHAT_ID，请在 .env 中配置（默认目标群，例如 -1001234567890）。")
