@@ -104,6 +104,8 @@ PROTECT_CONTENT = os.getenv("PROTECT_CONTENT", "false").strip().lower() in {
 
 DATA_FILE = Path(os.getenv("DATA_FILE", "data/bridge.json")).expanduser()
 
+MAX_MESSAGE_LINKS = 2000
+
 HELP_TEXT = (
     "🔗 已连接到桥接机器人。\n\n"
     "在这里发送的消息会转发到你绑定的群/Topic；"
@@ -162,6 +164,7 @@ class BridgeStore:
             "users": {},
             "allowed_users": list(ALLOWED_USER_IDS),
             "admin_users": list(ADMIN_USER_IDS),
+            "message_links": [],
             "groups": {},
         }
         self._load()
@@ -182,6 +185,7 @@ class BridgeStore:
         self.data.setdefault("users", {})
         self.data.setdefault("allowed_users", list(ALLOWED_USER_IDS))
         self.data.setdefault("admin_users", list(ADMIN_USER_IDS))
+        self.data.setdefault("message_links", [])
         self.data.setdefault("groups", {})
         self._save()
 
@@ -401,6 +405,46 @@ class BridgeStore:
                 self._save()
             return len(removed)
 
+    # ---------- 消息映射（用于回复引用） ----------
+
+    async def add_message_link(
+        self, src_chat: int, src_msg: int, dest_chat: int, dest_msg: int
+    ) -> None:
+        """记录一条消息从 src 转发/复制到 dest 后的 ID 对应关系。"""
+        async with self._lock:
+            links = self.data.setdefault("message_links", [])
+            links.append(
+                {
+                    "sc": int(src_chat),
+                    "sm": int(src_msg),
+                    "dc": int(dest_chat),
+                    "dm": int(dest_msg),
+                }
+            )
+            if len(links) > MAX_MESSAGE_LINKS:
+                del links[: len(links) - MAX_MESSAGE_LINKS]
+            self._save()
+
+    async def get_link_by_source(
+        self, src_chat: int, src_msg: int
+    ) -> Optional[tuple[int, int]]:
+        """按源消息找转发后的 (dest_chat, dest_msg)。"""
+        async with self._lock:
+            for link in reversed(self.data.get("message_links", [])):
+                if link["sc"] == src_chat and link["sm"] == src_msg:
+                    return int(link["dc"]), int(link["dm"])
+            return None
+
+    async def get_link_by_dest(
+        self, dest_chat: int, dest_msg: int
+    ) -> Optional[tuple[int, int]]:
+        """按转发后的消息找源 (src_chat, src_msg)。"""
+        async with self._lock:
+            for link in reversed(self.data.get("message_links", [])):
+                if link["dc"] == dest_chat and link["dm"] == dest_msg:
+                    return int(link["sc"]), int(link["sm"])
+            return None
+
     async def get_destination(self, user_id: int) -> Optional[tuple[int, int]]:
         """返回用户消息应该转发到的 (chat_id, thread_id)；无映射时返回默认目标。"""
         async with self._lock:
@@ -546,6 +590,14 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                 "✅ 已连接默认主题，之后该 Topic 的新消息会自动转发到这里。回复 /stop 可断开。"
             )
 
+    reply_to_id = None
+    if message.reply_to_message is not None:
+        link = await store.get_link_by_dest(
+            user.id, message.reply_to_message.message_id
+        )
+        if link and link[0] == target_chat_id and target_chat_id < 0:
+            reply_to_id = link[1]
+
     try:
         if BRIDGE_MODE == "forward":
             kwargs = {
@@ -556,7 +608,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
             }
             if target_thread_id:
                 kwargs["message_thread_id"] = target_thread_id
-            await context.bot.forward_message(**kwargs)
+            sent = await context.bot.forward_message(**kwargs)
         else:
             kwargs = {
                 "chat_id": target_chat_id,
@@ -566,7 +618,13 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
             }
             if target_thread_id:
                 kwargs["message_thread_id"] = target_thread_id
-            await context.bot.copy_message(**kwargs)
+            if reply_to_id:
+                kwargs["reply_to_message_id"] = reply_to_id
+                kwargs["allow_sending_without_reply"] = True
+            sent = await context.bot.copy_message(**kwargs)
+        await store.add_message_link(
+            user.id, message.message_id, target_chat_id, sent.message_id
+        )
     except Forbidden as exc:
         logger.warning("无法把用户 %s 的消息发到 %s：%s", user.id, target_chat_id, exc)
         await message.reply_text("❌ 消息未能送达目标（目标可能禁止转发，或机器人没有发送权限）。")
@@ -596,21 +654,35 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     for user_id in recipients:
+        reply_to_id = None
+        if message.reply_to_message is not None:
+            link = await store.get_link_by_source(
+                chat.id, message.reply_to_message.message_id
+            )
+            if link and link[0] == user_id:
+                reply_to_id = link[1]
         try:
             if BRIDGE_MODE == "forward":
-                await context.bot.forward_message(
+                sent = await context.bot.forward_message(
                     chat_id=user_id,
                     from_chat_id=chat.id,
                     message_id=message.message_id,
                     protect_content=PROTECT_CONTENT,
                 )
             else:
-                await context.bot.copy_message(
-                    chat_id=user_id,
-                    from_chat_id=chat.id,
-                    message_id=message.message_id,
-                    protect_content=PROTECT_CONTENT,
-                )
+                kwargs = {
+                    "chat_id": user_id,
+                    "from_chat_id": chat.id,
+                    "message_id": message.message_id,
+                    "protect_content": PROTECT_CONTENT,
+                }
+                if reply_to_id:
+                    kwargs["reply_to_message_id"] = reply_to_id
+                    kwargs["allow_sending_without_reply"] = True
+                sent = await context.bot.copy_message(**kwargs)
+            await store.add_message_link(
+                chat.id, message.message_id, user_id, sent.message_id
+            )
         except Forbidden as exc:
             logger.warning("用户 %s 无法接收消息（可能已屏蔽机器人），已自动移除：%s", user_id, exc)
             await store.remove_user(user_id)
