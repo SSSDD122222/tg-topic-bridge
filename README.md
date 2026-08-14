@@ -173,6 +173,8 @@ journalctl -u tg-topic-bridge -f
 | `/addadmin <用户ID或@用户名>`（私聊全局管理员） | 添加新的全局管理员 |
 | `/removeadmin <用户ID或@用户名>`（私聊全局管理员） | 移除全局管理员（不能移除自己） |
 | `/admins`（私聊全局管理员） | 查看当前全局管理员列表 |
+| `/setdefaultgroup <群ID>`（私聊全局管理员） | 更改默认群 |
+| `/setdefaulttopic <TopicID>`（私聊全局管理员） | 更改默认 Topic（配合上面命令远程迁移默认目标） |
 
 以上分流命令和默认订阅命令一起构成了完整的管理方式，`/bind`、`/unbind`、`/add`、`/remove`、`/status` 的说明见上面的多用户分流表格。
 

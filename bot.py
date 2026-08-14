@@ -155,6 +155,7 @@ class BridgeStore:
         self.path = path
         self._lock = asyncio.Lock()
         self.data: dict = {
+            "default_group_id": GROUP_CHAT_ID,
             "topic_thread_id": TOPIC_THREAD_ID,
             "subscribers": [],
             "mappings": {},
@@ -175,6 +176,7 @@ class BridgeStore:
             except (OSError, ValueError) as exc:
                 logger.warning("无法读取 %s，将重新创建：%s", self.path, exc)
         self.data.setdefault("topic_thread_id", TOPIC_THREAD_ID)
+        self.data.setdefault("default_group_id", GROUP_CHAT_ID)
         self.data.setdefault("subscribers", [])
         self.data.setdefault("mappings", {})
         self.data.setdefault("users", {})
@@ -192,6 +194,14 @@ class BridgeStore:
 
     def get_topic(self) -> int:
         return int(self.data.get("topic_thread_id") or 0)
+
+    def get_default_group(self) -> int:
+        return int(self.data.get("default_group_id") or GROUP_CHAT_ID)
+
+    async def set_default_group(self, chat_id: int) -> None:
+        async with self._lock:
+            self.data["default_group_id"] = int(chat_id)
+            self._save()
 
     async def set_topic(self, thread_id: int) -> None:
         async with self._lock:
@@ -399,7 +409,7 @@ class BridgeStore:
                 return int(mapping["chat_id"]), int(mapping["thread_id"])
             topic = int(self.data.get("topic_thread_id") or 0)
             if topic:
-                return GROUP_CHAT_ID, topic
+                return self.get_default_group(), topic
             return None
 
     async def recipient_user_ids(self, chat_id: int, thread_id: int) -> list[int]:
@@ -408,7 +418,7 @@ class BridgeStore:
             recipients: set[int] = set()
             default_topic = int(self.data.get("topic_thread_id") or 0)
             if (
-                chat_id == GROUP_CHAT_ID
+                chat_id == self.get_default_group()
                 and default_topic
                 and thread_id == default_topic
             ):
@@ -470,7 +480,7 @@ async def cmd_private_status(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if mapping:
         target = f"群 {mapping['chat_id']} / Topic {mapping['thread_id'] or '全部'}"
     elif store.get_topic():
-        target = f"默认群 {GROUP_CHAT_ID} / Topic {store.get_topic()}"
+        target = f"默认群 {store.get_default_group()} / Topic {store.get_topic()}"
     else:
         target = "未绑定"
     await message.reply_text(
@@ -850,7 +860,7 @@ async def cmd_group_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     mappings = await store.list_mappings()
     lines = [
         "📊 桥接状态：",
-        f"• 默认群：{GROUP_CHAT_ID}",
+        f"• 默认群：{store.get_default_group()}",
         f"• 默认 Topic：{store.get_topic() or '未设置'}",
         f"• 转发模式：{BRIDGE_MODE}",
     ]
@@ -1024,6 +1034,54 @@ async def cmd_admins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await message.reply_text("\n".join(lines))
 
 
+async def cmd_setdefaultgroup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """私聊全局管理员：更改默认群。"""
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+    store: BridgeStore = context.bot_data["store"]
+    if not await store.is_admin(user.id):
+        await message.reply_text("⛔ 只有全局管理员可以操作。")
+        return
+    if not context.args:
+        await message.reply_text("用法：/setdefaultgroup <群ID>")
+        return
+    try:
+        chat_id = int(context.args[0])
+    except ValueError:
+        await message.reply_text("❌ 群 ID 格式不正确（例如 -1001234567890）。")
+        return
+    await store.set_default_group(chat_id)
+    await message.reply_text(
+        f"✅ 默认群已改为 {chat_id}。\n"
+        "提醒：还需要在新群里设置默认 Topic——在新群的目标 Topic 发 /set_topic，"
+        "或私聊发 /setdefaulttopic <TopicID>。"
+    )
+
+
+async def cmd_setdefaulttopic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """私聊全局管理员：更改默认 Topic。"""
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+    store: BridgeStore = context.bot_data["store"]
+    if not await store.is_admin(user.id):
+        await message.reply_text("⛔ 只有全局管理员可以操作。")
+        return
+    if not context.args:
+        await message.reply_text("用法：/setdefaulttopic <TopicID>")
+        return
+    try:
+        thread_id = int(context.args[0])
+    except ValueError:
+        await message.reply_text("❌ Topic ID 格式不正确（正整数）。")
+        return
+    await store.set_topic(thread_id)
+    await message.reply_text(f"✅ 默认 Topic 已改为 {thread_id}。")
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("处理更新时出错：%s", context.error, exc_info=context.error)
 
@@ -1056,6 +1114,8 @@ def main() -> None:
     app.add_handler(CommandHandler("addadmin", cmd_addadmin, filters=PRIVATE_FILTER))
     app.add_handler(CommandHandler("removeadmin", cmd_removeadmin, filters=PRIVATE_FILTER))
     app.add_handler(CommandHandler("admins", cmd_admins, filters=PRIVATE_FILTER))
+    app.add_handler(CommandHandler("setdefaultgroup", cmd_setdefaultgroup, filters=PRIVATE_FILTER))
+    app.add_handler(CommandHandler("setdefaulttopic", cmd_setdefaulttopic, filters=PRIVATE_FILTER))
     app.add_handler(MessageHandler(GROUP_FILTER & ~filters.COMMAND, handle_group_message))
     app.add_handler(MessageHandler(PRIVATE_FILTER & filters.COMMAND, cmd_unknown))
 
@@ -1063,7 +1123,7 @@ def main() -> None:
 
     logger.info(
         "机器人启动：默认群=%s，默认Topic=%s，模式=%s，绑定用户=%d",
-        GROUP_CHAT_ID,
+        store.get_default_group(),
         store.get_topic() or "未设置",
         BRIDGE_MODE,
         len(store.data.get("mappings", {})),
