@@ -122,7 +122,7 @@ CHANNEL_FILTER = filters.ChatType.CHANNEL
 
 async def _can_use(store: BridgeStore, user_id: int) -> bool:
     """未配置白名单时允许所有人；配置后仅白名单成员（或管理员）可用。"""
-    if user_id in ADMIN_USER_IDS:
+    if await store.is_admin(user_id):
         return True
     return await store.is_allowed(user_id)
 
@@ -135,7 +135,8 @@ async def _is_group_admin(
     user = update.effective_user
     if message is None or user is None:
         return False
-    if user.id in ADMIN_USER_IDS:
+    store: BridgeStore = context.bot_data["store"]
+    if await store.is_admin(user.id):
         return True
     try:
         member = await context.bot.get_chat_member(
@@ -159,6 +160,7 @@ class BridgeStore:
             "mappings": {},
             "users": {},
             "allowed_users": list(ALLOWED_USER_IDS),
+            "admin_users": list(ADMIN_USER_IDS),
             "groups": {},
         }
         self._load()
@@ -177,6 +179,7 @@ class BridgeStore:
         self.data.setdefault("mappings", {})
         self.data.setdefault("users", {})
         self.data.setdefault("allowed_users", list(ALLOWED_USER_IDS))
+        self.data.setdefault("admin_users", list(ADMIN_USER_IDS))
         self.data.setdefault("groups", {})
         self._save()
 
@@ -281,6 +284,34 @@ class BridgeStore:
     async def list_allowed(self) -> list[int]:
         async with self._lock:
             return list(self.data.get("allowed_users") or [])
+
+    # ---------- 全局管理员（运行时管理） ----------
+
+    async def is_admin(self, user_id: int) -> bool:
+        async with self._lock:
+            return user_id in (self.data.get("admin_users") or [])
+
+    async def add_admin(self, user_id: int) -> bool:
+        async with self._lock:
+            admins = self.data.setdefault("admin_users", [])
+            if user_id in admins:
+                return False
+            admins.append(user_id)
+            self._save()
+            return True
+
+    async def remove_admin(self, user_id: int) -> bool:
+        async with self._lock:
+            admins = self.data.get("admin_users") or []
+            if user_id not in admins:
+                return False
+            admins.remove(user_id)
+            self._save()
+            return True
+
+    async def list_admins(self) -> list[int]:
+        async with self._lock:
+            return list(self.data.get("admin_users") or [])
 
     # ---------- 群记录（用于 /groups 查看机器人所在群） ----------
 
@@ -862,7 +893,7 @@ async def cmd_leave(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     target_chat: Optional[int] = None
 
     if chat.type == "private":
-        if user.id not in ADMIN_USER_IDS:
+        if not await store.is_admin(user.id):
             await message.reply_text("⛔ 只有配置的管理员可以远程让我退群。")
             return
         if not context.args:
@@ -897,10 +928,10 @@ async def cmd_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     user = update.effective_user
     if message is None or user is None:
         return
-    if user.id not in ADMIN_USER_IDS:
+    store: BridgeStore = context.bot_data["store"]
+    if not await store.is_admin(user.id):
         await message.reply_text("⛔ 只有配置的管理员可以查看。")
         return
-    store: BridgeStore = context.bot_data["store"]
     groups = await store.list_groups()
     if not groups:
         await message.reply_text(
@@ -913,6 +944,83 @@ async def cmd_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         title = info.get("title") or "(无标题)"
         lines.append(f"• {title}（{chat_id}）")
     lines.append("\n用 /leave <群ID> 可让机器人退出任意一个群。")
+    await message.reply_text("\n".join(lines))
+
+
+async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """私聊全局管理员：添加新的全局管理员。"""
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+    store: BridgeStore = context.bot_data["store"]
+    if not await store.is_admin(user.id):
+        await message.reply_text("⛔ 只有全局管理员可以操作。")
+        return
+    if not context.args:
+        await message.reply_text("用法：/addadmin <用户ID或@用户名>")
+        return
+    target = await store.resolve_user_id(context.args[0])
+    if target is None:
+        await message.reply_text(
+            "❌ 找不到该用户。数字 ID 可以直接用；@用户名 要求对方先私聊过机器人（发任意消息即可）。"
+        )
+        return
+    username = await store.get_username(target)
+    added = await store.add_admin(target)
+    await message.reply_text(
+        f"✅ 已把 {target}{' (@' + username + ')' if username else ''} 设为全局管理员。"
+        if added
+        else "ℹ️ 该用户已经是全局管理员。"
+    )
+
+
+async def cmd_removeadmin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """私聊全局管理员：移除某个全局管理员。"""
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+    store: BridgeStore = context.bot_data["store"]
+    if not await store.is_admin(user.id):
+        await message.reply_text("⛔ 只有全局管理员可以操作。")
+        return
+    if not context.args:
+        await message.reply_text("用法：/removeadmin <用户ID或@用户名>")
+        return
+    target = await store.resolve_user_id(context.args[0])
+    if target is None:
+        await message.reply_text(
+            "❌ 找不到该用户。数字 ID 可以直接用；@用户名 要求对方先私聊过机器人（发任意消息即可）。"
+        )
+        return
+    if target == user.id:
+        await message.reply_text("❌ 不能移除自己，否则会失去管理权限。")
+        return
+    username = await store.get_username(target)
+    removed = await store.remove_admin(target)
+    await message.reply_text(
+        f"✅ 已移除 {target}{' (@' + username + ')' if username else ''} 的全局管理员权限。"
+        if removed
+        else "ℹ️ 该用户不是全局管理员。"
+    )
+
+
+async def cmd_admins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """私聊全局管理员：查看当前全局管理员列表。"""
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+    store: BridgeStore = context.bot_data["store"]
+    if not await store.is_admin(user.id):
+        await message.reply_text("⛔ 只有全局管理员可以查看。")
+        return
+    admins = await store.list_admins()
+    lines = ["👑 全局管理员："]
+    for uid in admins:
+        name = await store.get_username(uid)
+        lines.append(f"• {uid}{' (@' + name + ')' if name else ''}")
     await message.reply_text("\n".join(lines))
 
 
@@ -945,6 +1053,9 @@ def main() -> None:
     app.add_handler(CommandHandler("leave", cmd_leave, filters=PRIVATE_FILTER))
     app.add_handler(CommandHandler("leave", cmd_leave, filters=GROUP_FILTER))
     app.add_handler(CommandHandler("groups", cmd_groups, filters=PRIVATE_FILTER))
+    app.add_handler(CommandHandler("addadmin", cmd_addadmin, filters=PRIVATE_FILTER))
+    app.add_handler(CommandHandler("removeadmin", cmd_removeadmin, filters=PRIVATE_FILTER))
+    app.add_handler(CommandHandler("admins", cmd_admins, filters=PRIVATE_FILTER))
     app.add_handler(MessageHandler(GROUP_FILTER & ~filters.COMMAND, handle_group_message))
     app.add_handler(MessageHandler(PRIVATE_FILTER & filters.COMMAND, cmd_unknown))
 
