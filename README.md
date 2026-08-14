@@ -23,7 +23,7 @@
 | `deploy/tg-topic-bridge.service` | 不用 Docker 时的 systemd 服务模板 |
 | `README.md` | 使用和部署文档 |
 | `.gitignore` / `.dockerignore` | 排除 `.env`、`data/` 等敏感/临时文件 |
-| `data/bridge.json` | 运行时自动生成：默认 Topic、订阅者、分流绑定（不要手动改） |
+| `data/bridge.json` | 运行时自动生成：默认 Topic、订阅者、分流绑定、白名单、群记录（不要手动改） |
 
 ## 一、准备工作
 
@@ -173,6 +173,8 @@ journalctl -u tg-topic-bridge -f
 
 以上分流命令和默认订阅命令一起构成了完整的管理方式，`/bind`、`/unbind`、`/add`、`/remove`、`/status` 的说明见上面的多用户分流表格。
 
+注意：Telegram 没有“查询机器人加入了哪些群”的接口，`/groups` 只能列出**机器人收到过消息/入群通知**的群；新部署后，需要群里有人发消息才会被记录。
+
 ## 五、常见问题
 
 - **群内消息转发不出来**：基本是隐私模式没关，或机器人没有“读取消息”管理员权限。
@@ -286,6 +288,7 @@ scp -r "本地路径\tg-topic-bridge" root@你的IP:/opt/
 - **新用户一直说没权限**：白名单默认全拒，必须先让用户私聊一次，再 `/allow`。
 - **VPS 连不上 Telegram**：机房要选海外，国内大陆机房直连不通。
 - **更新代码/重启**：`cd /opt/tg-topic-bridge && docker compose up -d --build`。
+- **`git pull` 提示本地文件会被覆盖**：说明 VPS 上手动改过文件，先执行 `git checkout -- bot.py` 再 `git pull`。
 - **备份**：定期备份 `data/bridge.json`（订阅和绑定都在里面）。
 
 ## 安全建议
@@ -293,3 +296,4 @@ scp -r "本地路径\tg-topic-bridge" root@你的IP:/opt/
 - 白名单默认全拒：只有通过 `ALLOWED_USER_IDS` 或 `/allow` 添加的用户才能私聊使用，避免任何人拿到 bot 后都能读取 Topic 内容。
 - 不要泄露 token；泄露后在 BotFather 中 `/revoke` 重新生成。
 - 想要隐藏 Topic 所属群的痕迹，把 `BRIDGE_MODE` 设为 `copy`。
+- 任何人知道 @用户名都可以把机器人拉进自己的群：建议在 BotFather 中关闭 **Allow Groups**（需要时再打开）；已拉入的群可用私聊 `/groups` 查看、`/leave <群ID>` 踢出。
