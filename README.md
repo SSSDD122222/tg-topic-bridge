@@ -22,6 +22,7 @@
 | `deploy/install.sh` | VPS 一键部署脚本：自动装 Docker、建 swap、检查配置、启动 |
 | `deploy/tg-topic-bridge.service` | 不用 Docker 时的 systemd 服务模板 |
 | `README.md` | 使用和部署文档 |
+| `使用手册.md` | 傻瓜操作手册（含架构图、部署流程、命令速查、故障排查） |
 | `.gitignore` / `.dockerignore` | 排除 `.env`、`data/` 等敏感/临时文件 |
 | `data/bridge.json` | 运行时自动生成：默认 Topic、订阅者、分流绑定、白名单、群记录（不要手动改） |
 
