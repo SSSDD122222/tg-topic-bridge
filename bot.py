@@ -156,6 +156,21 @@ async def _is_group_admin(
     return member.status in ("administrator", "creator")
 
 
+async def _notify_whitelist_removed(
+    context: ContextTypes.DEFAULT_TYPE, user_id: int
+) -> None:
+    """向被移出白名单的用户推送会话结束通知。"""
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="会话已结束，管理员已将你移出白名单。如需重新使用，请联系管理员。",
+        )
+    except Forbidden:
+        logger.warning("无法通知用户 %s（可能已屏蔽机器人）", user_id)
+    except TelegramError as exc:
+        logger.warning("通知用户 %s 失败：%s", user_id, exc)
+
+
 class BridgeStore:
     """用 JSON 文件保存默认 Topic、默认订阅者和用户分流映射（单实例部署）。"""
 
@@ -672,6 +687,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         removed_users = await store.remove_topic_bindings(chat.id, thread_id)
         for uid in removed_users:
             await store.remove_allowed(uid)
+            await _notify_whitelist_removed(context, uid)
         logger.info(
             "群 %s 的话题 %s 已删除：解绑 %d 个用户并移出白名单",
             chat.id,
@@ -948,6 +964,7 @@ async def cmd_disallow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     username = await store.get_username(target)
     removed = await store.remove_allowed(target)
     await store.remove_user(target)
+    await _notify_whitelist_removed(context, target)
     await message.reply_text(
         f"✅ 已把 {target}{' (@' + username + ')' if username else ''} 移出白名单，并解除了他/她的全部绑定（订阅和分流映射）。"
         if removed
