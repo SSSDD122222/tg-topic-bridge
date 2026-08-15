@@ -50,6 +50,16 @@ class _TokenRedactionFilter(logging.Filter):
         super().__init__()
         self.token = token
 
+    @staticmethod
+    def _redact(value, token: str):
+        try:
+            text = str(value)
+        except Exception:
+            return value
+        if token and token in text:
+            return text.replace(token, "***")
+        return value
+
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             if not self.token:
@@ -57,14 +67,11 @@ class _TokenRedactionFilter(logging.Filter):
             record.msg = str(record.msg).replace(self.token, "***")
             if isinstance(record.args, dict):
                 record.args = {
-                    k: (str(v).replace(self.token, "***") if isinstance(v, str) else v)
+                    k: self._redact(v, self.token)
                     for k, v in record.args.items()
                 }
             elif isinstance(record.args, tuple):
-                record.args = tuple(
-                    str(a).replace(self.token, "***") if isinstance(a, str) else a
-                    for a in record.args
-                )
+                record.args = tuple(self._redact(a, self.token) for a in record.args)
         except Exception:
             pass
         return True
@@ -667,8 +674,45 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         logger.warning("无法把用户 %s 的消息发到 %s：%s", user.id, target_chat_id, exc)
         await message.reply_text("❌ 消息未能送达目标（目标可能禁止转发，或机器人没有发送权限）。")
     except TelegramError as exc:
-        logger.error("把用户 %s 的消息发到 %s 失败：%s", user.id, target_chat_id, exc)
-        await message.reply_text("❌ 消息转发失败，请稍后重试。")
+        err_text = str(exc)
+        if "message thread not found" in err_text.lower():
+            # Telegram 不会向机器人推送“话题已删除”事件，
+            # 只能在该用户下次发消息、发送失败时检测到话题已不存在。
+            mapping = await store.get_mapping(user.id)
+            if (
+                mapping
+                and int(mapping["chat_id"]) == target_chat_id
+                and int(mapping["thread_id"]) == target_thread_id
+            ):
+                await store.remove_user(user.id)
+                if await store.remove_allowed(user.id):
+                    await _notify_whitelist_removed(context, user.id)
+                logger.info(
+                    "用户 %s 绑定的群 %s 话题 %s 已不存在（可能被删除）：已自动解绑并移出白名单",
+                    user.id,
+                    target_chat_id,
+                    target_thread_id,
+                )
+                await message.reply_text(
+                    "⚠️ 你绑定的目标话题已被删除，机器人已自动解除绑定并移出白名单。\n"
+                    "如需继续使用，请联系管理员重新绑定。"
+                )
+            elif (
+                target_chat_id == store.get_default_group()
+                and target_thread_id
+                and target_thread_id == store.get_topic()
+            ):
+                await store.set_topic(0)
+                logger.info("默认话题 %s 已不存在（可能被删除）：默认话题已清空", target_thread_id)
+                await message.reply_text(
+                    "⚠️ 默认话题已被删除，请让管理员重新设置默认话题。"
+                )
+            else:
+                logger.error("把用户 %s 的消息发到 %s 失败：%s", user.id, target_chat_id, exc)
+                await message.reply_text("❌ 消息转发失败，请稍后重试。")
+        else:
+            logger.error("把用户 %s 的消息发到 %s 失败：%s", user.id, target_chat_id, exc)
+            await message.reply_text("❌ 消息转发失败，请稍后重试。")
 
 
 # ---------- 群消息：目标群/Topic -> 绑定用户 ----------
@@ -682,31 +726,18 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     store: BridgeStore = context.bot_data["store"]
     await store.remember_group(chat.id, chat.title)
 
-    if (
-        getattr(message, "forum_topic_deleted", None)
-        or getattr(message, "forum_topic_created", None)
-        or getattr(message, "forum_topic_closed", None)
-        or getattr(message, "forum_topic_reopened", None)
-        or getattr(message, "forum_topic_edited", None)
-    ):
+    topic_service_keys = (
+        "forum_topic_created",
+        "forum_topic_closed",
+        "forum_topic_reopened",
+        "forum_topic_edited",
+    )
+    if any(getattr(message, key, None) for key in topic_service_keys):
         logger.info(
-            "收到话题服务消息：chat=%s thread=%s deleted=%s",
+            "收到话题服务消息：chat=%s thread=%s keys=%s",
             chat.id,
             message.message_thread_id,
-            bool(getattr(message, "forum_topic_deleted", None)),
-        )
-
-    if getattr(message, "forum_topic_deleted", None):
-        thread_id = message.message_thread_id or 0
-        removed_users = await store.remove_topic_bindings(chat.id, thread_id)
-        for uid in removed_users:
-            if await store.remove_allowed(uid):
-                await _notify_whitelist_removed(context, uid)
-        logger.info(
-            "群 %s 的话题 %s 已删除：解绑 %d 个用户并移出白名单",
-            chat.id,
-            thread_id,
-            len(removed_users),
+            [key for key in topic_service_keys if getattr(message, key, None)],
         )
         return
 
