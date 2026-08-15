@@ -811,11 +811,17 @@ async def cmd_bind(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     username = await store.get_username(target_user)
+    if await store.is_allowed(target_user):
+        whitelist_note = "ℹ️ 该用户已在白名单中"
+    else:
+        await store.add_allowed(target_user)
+        whitelist_note = "✅ 已自动加入白名单"
     await store.set_mapping(target_user, target_chat, target_thread)
     await message.reply_text(
         f"✅ 已把用户 {target_user}{' (@' + username + ')' if username else ''} 绑定到：\n"
         f"• 群/频道 ID：{target_chat}\n"
-        f"• Topic ID：{target_thread if target_thread else '全部（不区分 Topic）'}\n\n"
+        f"• Topic ID：{target_thread if target_thread else '全部（不区分 Topic）'}\n"
+        f"• 白名单：{whitelist_note}\n\n"
         "注意：对方必须先私聊过机器人，否则机器人无法主动给 TA 发消息。"
     )
 
