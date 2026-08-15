@@ -18,7 +18,14 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import (
+    InputMediaAnimation,
+    InputMediaAudio,
+    InputMediaDocument,
+    InputMediaPhoto,
+    InputMediaVideo,
+    Update,
+)
 from telegram.error import Forbidden, TelegramError
 from telegram.ext import (
     Application,
@@ -480,6 +487,17 @@ class BridgeStore:
                     return int(link["dc"]), int(link["dm"])
             return None
 
+    async def list_links_by_source(
+        self, src_chat: int, src_msg: int
+    ) -> list[tuple[int, int]]:
+        """按源消息找所有转发/复制后的 (dest_chat, dest_msg)。"""
+        async with self._lock:
+            return [
+                (int(link["dc"]), int(link["dm"]))
+                for link in reversed(self.data.get("message_links", []))
+                if link["sc"] == src_chat and link["sm"] == src_msg
+            ]
+
     async def get_link_by_dest(
         self, dest_chat: int, dest_msg: int
     ) -> Optional[tuple[int, int]]:
@@ -606,6 +624,99 @@ async def cmd_my_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ---------- 私聊消息：外部用户 -> 目标群/Topic/频道 ----------
 
+async def _sync_edit_to_dest(
+    context: ContextTypes.DEFAULT_TYPE,
+    message,
+    dest_chat_id: int,
+    dest_message_id: int,
+) -> bool:
+    """把源消息编辑后的内容同步到复制品（仅 copy 模式；forward 的转发消息无法编辑）。"""
+    if BRIDGE_MODE != "copy":
+        logger.info("forward 模式不支持编辑同步，跳过：chat=%s msg=%s", message.chat_id, message.message_id)
+        return False
+    try:
+        if message.photo:
+            await context.bot.edit_message_media(
+                chat_id=dest_chat_id,
+                message_id=dest_message_id,
+                media=InputMediaPhoto(
+                    media=message.photo[-1].file_id,
+                    caption=message.caption or "",
+                    caption_entities=message.caption_entities,
+                ),
+            )
+        elif message.video:
+            await context.bot.edit_message_media(
+                chat_id=dest_chat_id,
+                message_id=dest_message_id,
+                media=InputMediaVideo(
+                    media=message.video.file_id,
+                    caption=message.caption or "",
+                    caption_entities=message.caption_entities,
+                ),
+            )
+        elif message.animation:
+            await context.bot.edit_message_media(
+                chat_id=dest_chat_id,
+                message_id=dest_message_id,
+                media=InputMediaAnimation(
+                    media=message.animation.file_id,
+                    caption=message.caption or "",
+                    caption_entities=message.caption_entities,
+                ),
+            )
+        elif message.audio:
+            await context.bot.edit_message_media(
+                chat_id=dest_chat_id,
+                message_id=dest_message_id,
+                media=InputMediaAudio(
+                    media=message.audio.file_id,
+                    caption=message.caption or "",
+                    caption_entities=message.caption_entities,
+                ),
+            )
+        elif message.document:
+            await context.bot.edit_message_media(
+                chat_id=dest_chat_id,
+                message_id=dest_message_id,
+                media=InputMediaDocument(
+                    media=message.document.file_id,
+                    caption=message.caption or "",
+                    caption_entities=message.caption_entities,
+                ),
+            )
+        elif message.text is not None:
+            await context.bot.edit_message_text(
+                chat_id=dest_chat_id,
+                message_id=dest_message_id,
+                text=message.text,
+                entities=message.entities,
+            )
+        elif message.caption is not None:
+            await context.bot.edit_message_caption(
+                chat_id=dest_chat_id,
+                message_id=dest_message_id,
+                caption=message.caption,
+                caption_entities=message.caption_entities,
+            )
+        else:
+            logger.info(
+                "该类型消息暂不支持编辑同步：chat=%s msg=%s",
+                message.chat_id,
+                message.message_id,
+            )
+            return False
+        return True
+    except TelegramError as exc:
+        logger.warning(
+            "同步编辑到 %s/%s 失败：%s",
+            dest_chat_id,
+            dest_message_id,
+            exc,
+        )
+        return False
+
+
 async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     user = update.effective_user
@@ -613,6 +724,19 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         return
     store: BridgeStore = context.bot_data["store"]
     await store.remember_user(user.id, user.username)
+    if update.edited_message is not None:
+        if await _can_use(store, user.id):
+            links = await store.list_links_by_source(user.id, message.message_id)
+            for dest_chat, dest_msg in links:
+                await _sync_edit_to_dest(context, message, dest_chat, dest_msg)
+            if links:
+                logger.info(
+                    "已同步用户 %s 消息 %s 的编辑到 %d 个目标",
+                    user.id,
+                    message.message_id,
+                    len(links),
+                )
+        return
     if not await _can_use(store, user.id):
         await message.reply_text(
             "⛔ 你没有使用该桥接机器人的权限。\n"
@@ -725,6 +849,19 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     store: BridgeStore = context.bot_data["store"]
     await store.remember_group(chat.id, chat.title)
+
+    if update.edited_message is not None:
+        links = await store.list_links_by_source(chat.id, message.message_id)
+        for dest_chat, dest_msg in links:
+            await _sync_edit_to_dest(context, message, dest_chat, dest_msg)
+        if links:
+            logger.info(
+                "已同步群 %s 消息 %s 的编辑到 %d 个目标",
+                chat.id,
+                message.message_id,
+                len(links),
+            )
+        return
 
     topic_service_keys = (
         "forum_topic_created",
