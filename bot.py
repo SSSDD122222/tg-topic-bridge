@@ -106,6 +106,12 @@ DATA_FILE = Path(os.getenv("DATA_FILE", "data/bridge.json")).expanduser()
 
 MAX_MESSAGE_LINKS = 2000
 
+BOT_DESCRIPTION = (
+    "本机器人用于桥接群内话题：直接发消息即可，"
+    "你的消息会转发到群内指定话题，该话题的新消息也会自动发给你。"
+    "如遇问题请联系群管理员。"
+)
+
 HELP_TEXT = (
     "🔗 已连接到桥接机器人。\n\n"
     "在这里发送的消息会转发到你绑定的群/Topic；"
@@ -1158,9 +1164,17 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.error("处理更新时出错：%s", context.error, exc_info=context.error)
 
 
+async def post_init(application: Application) -> None:
+    """启动时设置机器人简介，用户在点开聊天（未按 Start）前即可看到。"""
+    try:
+        await application.bot.set_my_description(BOT_DESCRIPTION)
+    except TelegramError as exc:
+        logger.warning("设置机器人简介失败：%s", exc)
+
+
 def main() -> None:
     store = BridgeStore(DATA_FILE)
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.bot_data["store"] = store
 
     app.add_handler(CommandHandler("start", cmd_start, filters=PRIVATE_FILTER))
