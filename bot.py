@@ -682,7 +682,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     store: BridgeStore = context.bot_data["store"]
     await store.remember_group(chat.id, chat.title)
 
-    if message.forum_topic_deleted:
+    if getattr(message, "forum_topic_deleted", None):
         thread_id = message.message_thread_id or 0
         removed_users = await store.remove_topic_bindings(chat.id, thread_id)
         for uid in removed_users:
