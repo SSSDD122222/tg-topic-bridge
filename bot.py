@@ -411,6 +411,23 @@ class BridgeStore:
                 self._save()
             return len(removed)
 
+    async def remove_topic_bindings(self, chat_id: int, thread_id: int) -> list[int]:
+        """话题被删除时：解绑绑定到该话题的所有用户；若默认话题正是它则清空默认话题。"""
+        async with self._lock:
+            removed_users = []
+            for key, dest in list(self.data["mappings"].items()):
+                if (
+                    int(dest["chat_id"]) == chat_id
+                    and int(dest["thread_id"]) == thread_id
+                ):
+                    removed_users.append(int(key))
+                    del self.data["mappings"][key]
+            if int(self.data.get("topic_thread_id") or 0) == thread_id:
+                self.data["topic_thread_id"] = 0
+            if removed_users:
+                self._save()
+            return removed_users
+
     # ---------- 消息映射（用于回复引用） ----------
 
     async def add_message_link(
@@ -649,6 +666,19 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     store: BridgeStore = context.bot_data["store"]
     await store.remember_group(chat.id, chat.title)
+
+    if message.forum_topic_deleted:
+        thread_id = message.message_thread_id or 0
+        removed_users = await store.remove_topic_bindings(chat.id, thread_id)
+        for uid in removed_users:
+            await store.remove_allowed(uid)
+        logger.info(
+            "群 %s 的话题 %s 已删除：解绑 %d 个用户并移出白名单",
+            chat.id,
+            thread_id,
+            len(removed_users),
+        )
+        return
 
     if message.from_user is None and message.sender_chat is None:
         return  # 服务消息（成员进出等）不转发
