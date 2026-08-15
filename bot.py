@@ -871,6 +871,68 @@ async def cmd_bind(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_delete_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """管理员在当前话题内发送 /deletetopic yes：删除该话题并自动清理绑定。
+
+    Telegram 不会向机器人推送“话题已删除”事件，所以让管理员通过机器人删话题，
+    机器人就能在删除的同时解绑该话题的用户、移出白名单并通知对方。
+    """
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+    if not await _is_group_admin(update, context):
+        await message.reply_text("⛔ 只有群管理员可以删除话题。")
+        return
+    if not context.args or context.args[0].lower() not in ("yes", "confirm", "确认"):
+        await message.reply_text(
+            "⚠️ 该操作会永久删除当前话题及其中所有消息。\n"
+            "确认请发送：/deletetopic yes\n\n"
+            "删除后，绑定到该话题的用户会被自动解绑并移出白名单。"
+        )
+        return
+    thread_id = message.message_thread_id or 0
+    if not thread_id or thread_id == 1:
+        await message.reply_text("⚠️ 请在要删除的话题内发送此命令（General 话题不能删除）。")
+        return
+
+    store: BridgeStore = context.bot_data["store"]
+    chat_id = message.chat_id
+    try:
+        await context.bot.delete_forum_topic(
+            chat_id=chat_id, message_thread_id=thread_id
+        )
+    except TelegramError as exc:
+        await message.reply_text(
+            f"❌ 删除失败：{exc}\n"
+            "（需要机器人为群管理员，并勾选“删除消息”权限）"
+        )
+        return
+
+    removed_users = await store.remove_topic_bindings(chat_id, thread_id)
+    for uid in removed_users:
+        if await store.remove_allowed(uid):
+            await _notify_whitelist_removed(context, uid)
+    logger.info(
+        "管理员通过 /deletetopic 删除群 %s 话题 %s：解绑 %d 个用户并移出白名单",
+        chat_id,
+        thread_id,
+        len(removed_users),
+    )
+    text = (
+        f"✅ 话题 {thread_id} 已删除，并自动解绑 {len(removed_users)} 个用户、移出白名单。"
+    )
+    try:
+        await context.bot.send_message(chat_id=user.id, text=text)
+    except (Forbidden, TelegramError):
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id, message_thread_id=1, text=text
+            )
+        except TelegramError:
+            pass
+
+
 async def cmd_unbind(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     user = update.effective_user
@@ -1286,6 +1348,7 @@ def main() -> None:
     app.add_handler(CommandHandler("set_topic", cmd_set_topic, filters=GROUP_FILTER))
     app.add_handler(CommandHandler("topic", cmd_topic_info, filters=GROUP_FILTER))
     app.add_handler(CommandHandler("bind", cmd_bind, filters=GROUP_FILTER))
+    app.add_handler(CommandHandler("deletetopic", cmd_delete_topic, filters=GROUP_FILTER))
     app.add_handler(CommandHandler("unbind", cmd_unbind, filters=GROUP_FILTER))
     app.add_handler(CommandHandler("add", cmd_add, filters=GROUP_FILTER))
     app.add_handler(CommandHandler("remove", cmd_remove, filters=GROUP_FILTER))
