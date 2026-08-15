@@ -686,8 +686,8 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         thread_id = message.message_thread_id or 0
         removed_users = await store.remove_topic_bindings(chat.id, thread_id)
         for uid in removed_users:
-            await store.remove_allowed(uid)
-            await _notify_whitelist_removed(context, uid)
+            if await store.remove_allowed(uid):
+                await _notify_whitelist_removed(context, uid)
         logger.info(
             "群 %s 的话题 %s 已删除：解绑 %d 个用户并移出白名单",
             chat.id,
@@ -964,7 +964,8 @@ async def cmd_disallow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     username = await store.get_username(target)
     removed = await store.remove_allowed(target)
     await store.remove_user(target)
-    await _notify_whitelist_removed(context, target)
+    if removed:
+        await _notify_whitelist_removed(context, target)
     await message.reply_text(
         f"✅ 已把 {target}{' (@' + username + ')' if username else ''} 移出白名单，并解除了他/她的全部绑定（订阅和分流映射）。"
         if removed
