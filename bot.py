@@ -29,6 +29,7 @@ from telegram import (
 from telegram.error import Forbidden, TelegramError
 from telegram.ext import (
     Application,
+    ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -381,6 +382,16 @@ class BridgeStore:
     async def list_groups(self) -> dict[int, dict]:
         async with self._lock:
             return {int(k): dict(v) for k, v in self.data.get("groups", {}).items()}
+
+    async def forget_group(self, chat_id: int) -> bool:
+        """机器人退群/被移除/群被删除后，从群记录中删除该群。"""
+        async with self._lock:
+            key = str(chat_id)
+            if key not in self.data.get("groups", {}):
+                return False
+            del self.data["groups"][key]
+            self._save()
+            return True
 
     # ---------- 用户分流映射 ----------
 
@@ -1333,6 +1344,43 @@ async def cmd_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await message.reply_text("\n".join(lines))
 
 
+async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """机器人被移出群、主动退群或群被删除时，从 /groups 记录中移除该群。"""
+    my_member = update.my_chat_member
+    if my_member is None:
+        return
+    chat = my_member.chat
+    status = my_member.new_status.status if my_member.new_status else None
+    if status in ("left", "kicked"):
+        store: BridgeStore = context.bot_data["store"]
+        if await store.forget_group(chat.id):
+            logger.info("机器人已不在群 %s（状态=%s），已从 /groups 记录中移除", chat.id, status)
+
+
+async def cmd_forgetgroup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """私聊全局管理员：从 /groups 记录中手动删除某个群。"""
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+    store: BridgeStore = context.bot_data["store"]
+    if not await store.is_admin(user.id):
+        await message.reply_text("⛔ 只有全局管理员可以操作。")
+        return
+    if not context.args:
+        await message.reply_text("用法：/forgetgroup <群ID>")
+        return
+    try:
+        chat_id = int(context.args[0])
+    except ValueError:
+        await message.reply_text("❌ 群 ID 必须是数字（例如 -1001234567890）。")
+        return
+    if await store.forget_group(chat_id):
+        await message.reply_text(f"✅ 已从 /groups 记录中移除 {chat_id}。")
+    else:
+        await message.reply_text(f"ℹ️ 记录中没有 {chat_id}。")
+
+
 async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """私聊全局管理员：添加新的全局管理员。"""
     message = update.effective_message
@@ -1496,11 +1544,15 @@ def main() -> None:
     app.add_handler(CommandHandler("leave", cmd_leave, filters=PRIVATE_FILTER))
     app.add_handler(CommandHandler("leave", cmd_leave, filters=GROUP_FILTER))
     app.add_handler(CommandHandler("groups", cmd_groups, filters=PRIVATE_FILTER))
+    app.add_handler(CommandHandler("forgetgroup", cmd_forgetgroup, filters=PRIVATE_FILTER))
     app.add_handler(CommandHandler("addadmin", cmd_addadmin, filters=PRIVATE_FILTER))
     app.add_handler(CommandHandler("removeadmin", cmd_removeadmin, filters=PRIVATE_FILTER))
     app.add_handler(CommandHandler("admins", cmd_admins, filters=PRIVATE_FILTER))
     app.add_handler(CommandHandler("setdefaultgroup", cmd_setdefaultgroup, filters=PRIVATE_FILTER))
     app.add_handler(CommandHandler("setdefaulttopic", cmd_setdefaulttopic, filters=PRIVATE_FILTER))
+    app.add_handler(
+        ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER)
+    )
     app.add_handler(MessageHandler(GROUP_FILTER & ~filters.COMMAND, handle_group_message))
     app.add_handler(MessageHandler(PRIVATE_FILTER & filters.COMMAND, cmd_unknown))
 
